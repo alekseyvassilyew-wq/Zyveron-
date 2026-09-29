@@ -107,28 +107,25 @@ async def show_home(message_or_call,l):
 
         await message_or_call.answer()
 
-@dp.message(CommandStart())
-async def start(m:Message):
-    cur.execute("INSERT OR IGNORE INTO users(id,name,username) VALUES(?,?,?)",(m.from_user.id,m.from_user.full_name,m.from_user.username)); conn.commit()
-    l=lang(m.from_user.id)
-    if not l:
-        if Path(LOGO_PATH).exists(): await m.answer_photo(__import__('aiogram').types.FSInputFile(LOGO_PATH),caption="🌐 <b>Choose language / Выберите язык / Izvēlieties valodu</b>",reply_markup=languages(),parse_mode="HTML")
-        else: await m.answer("🌐 Choose language / Выберите язык / Izvēlieties valodu",reply_markup=languages())
-    else: await show_home(m,l)
 
-@dp.callback_query(F.data.startswith("lang:"))
-async def choose_lang(c:CallbackQuery):
-    l=c.data.split(":")[1]
-    cur.execute("UPDATE users SET lang=?,name=?,username=? WHERE id=?",(l,c.from_user.full_name,c.from_user.username,c.from_user.id)); conn.commit()
-    await show_home(c,l)
 
 @dp.callback_query(F.data=="home")
 async def home(c:CallbackQuery): await show_home(c,lang(c.from_user.id) or "ru")
 
 @dp.callback_query(F.data=="m:language")
 async def change_lang(c:CallbackQuery):
-    await c.message.edit_text("🌐 Выберите язык / Izvēlieties valodu / Choose language",reply_markup=languages()); await c.answer()
-
+    if c.message.photo:
+        await c.message.edit_caption(
+            caption="🌐 Выберите язык / Izvēlieties valodu / Choose language",
+            reply_markup=languages()
+        )
+    else:
+        await c.message.edit_text(
+            "🌐 Выберите язык / Izvēlietzie valodu / Choose language",
+            reply_markup=languages()
+        )
+    await c.answer()
+    
 @dp.callback_query(F.data=="m:services")
 async def services(c:CallbackQuery):
     l=lang(c.from_user.id) or "ru"; rows=cur.execute("SELECT * FROM services WHERE active=1 ORDER BY sort").fetchall()
