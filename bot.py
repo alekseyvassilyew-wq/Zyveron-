@@ -1,129 +1,306 @@
-import os, asyncio, sqlite3, logging
+
+import os, asyncio, logging, sqlite3, json
+from pathlib import Path
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, CommandStart
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 
 logging.basicConfig(level=logging.INFO)
-TOKEN=os.getenv('BOT_TOKEN','')
-ADMIN_ID=int(os.getenv('ADMIN_ID','0'))
-if not TOKEN: raise RuntimeError('BOT_TOKEN is not set')
-bot=Bot(TOKEN); dp=Dispatcher()
-DB=os.getenv('DB_PATH','data/zyveron.db'); os.makedirs(os.path.dirname(DB) or '.',exist_ok=True)
-conn=sqlite3.connect(DB,check_same_thread=False); conn.row_factory=sqlite3.Row
-conn.executescript('''
-CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, lang TEXT DEFAULT 'ru');
-CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT, price TEXT, active INTEGER DEFAULT 1);
-CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, user_id INTEGER, name TEXT, username TEXT, lang TEXT, text TEXT, contact TEXT, status TEXT DEFAULT 'new', created TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS portfolio(id INTEGER PRIMARY KEY AUTOINCREMENT, file_id TEXT, caption TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
-''')
-def setting(k,d=''): 
- r=conn.execute('SELECT v FROM settings WHERE k=?',(k,)).fetchone(); return r['v'] if r else d
-def set_setting(k,v): conn.execute('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v',(k,v)); conn.commit()
-def seed():
- if conn.execute('SELECT COUNT(*) c FROM services').fetchone()['c']==0:
-  for n,d,p in [('Telegram-бот','Боты для заявок, заказов и автоматизации','от €50'),('Автоматизация','Автоматизация процессов бизнеса','от €75'),('Сайт','Лендинг или сайт под задачу','от €100'),('Настройка Telegram','Группы, меню, модерация','от €20')]: conn.execute('INSERT INTO services(name,description,price) VALUES(?,?,?)',(n,d,p))
-  conn.commit()
-seed()
+TOKEN=os.getenv("BOT_TOKEN")
+ADMIN_ID=int(os.getenv("ADMIN_ID","0"))
+DB_PATH=os.getenv("DB_PATH","/opt/render/project/src/data/zyveron.db")
+LOGO_PATH=os.getenv("LOGO_PATH","media/logo.jpg")
+if not TOKEN: raise RuntimeError("BOT_TOKEN is not set")
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+Path(LOGO_PATH).parent.mkdir(parents=True, exist_ok=True)
 
-T={'ru':{'choose':'Выберите язык:','welcome':'👋 Добро пожаловать в <b>ZYVERON</b>!\n\nЦифровые решения для бизнеса.','services':'🛠 Услуги','prices':'💰 Цены','portfolio':'🖼 Портфолио','order':'📝 Заказать','contact':'📞 Связаться','language':'🌐 Язык','back':'⬅️ Назад','sent':'✅ Отправлено! Ожидайте ответа от ZYVERON.','ask':'Напишите сообщение одним текстом:','admin':'🔐 Админ-панель'},'lv':{'choose':'Izvēlieties valodu:','welcome':'👋 Laipni lūdzam <b>ZYVERON</b>!\n\nDigitālie risinājumi uzņēmumiem.','services':'🛠 Pakalpojumi','prices':'💰 Cenas','portfolio':'🖼 Portfolio','order':'📝 Pasūtīt','contact':'📞 Sazināties','language':'🌐 Valoda','back':'⬅️ Atpakaļ','sent':'✅ Nosūtīts! Gaidiet ZYVERON atbildi.','ask':'Uzrakstiet ziņu vienā tekstā:','admin':'🔐 Admin panelis'},'en':{'choose':'Choose language:','welcome':'👋 Welcome to <b>ZYVERON</b>!\n\nDigital solutions for business.','services':'🛠 Services','prices':'💰 Prices','portfolio':'🖼 Portfolio','order':'📝 Order','contact':'📞 Contact','language':'🌐 Language','back':'⬅️ Back','sent':'✅ Sent! Please wait for a reply from ZYVERON.','ask':'Write your message in one text:','admin':'🔐 Admin panel'}}
+bot=Bot(TOKEN); dp=Dispatcher(storage=MemoryStorage())
+conn=sqlite3.connect(DB_PATH, check_same_thread=False); conn.row_factory=sqlite3.Row
+cur=conn.cursor()
+cur.executescript("""
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, lang TEXT, name TEXT, username TEXT);
+CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY AUTOINCREMENT, name_ru TEXT, name_lv TEXT, name_en TEXT, desc_ru TEXT, desc_lv TEXT, desc_en TEXT, price_ru TEXT, price_lv TEXT, price_en TEXT, active INTEGER DEFAULT 1, sort INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS menu(id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, label_ru TEXT, label_lv TEXT, label_en TEXT, action TEXT, active INTEGER DEFAULT 1, sort INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS portfolio(id INTEGER PRIMARY KEY AUTOINCREMENT, file_id TEXT, title_ru TEXT, title_lv TEXT, title_en TEXT, desc_ru TEXT, desc_lv TEXT, desc_en TEXT, active INTEGER DEFAULT 1, sort INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, kind TEXT, service TEXT, budget TEXT, contact TEXT, text TEXT, status TEXT DEFAULT 'new', created TEXT DEFAULT CURRENT_TIMESTAMP);
+""")
+defaults={
+'welcome_ru':"👋 Добро пожаловать в <b>ZYVERON</b>!\n\nЦифровые решения для бизнеса: Telegram-боты, автоматизация, сайты и разработка.",
+'welcome_lv':"👋 Laipni lūdzam <b>ZYVERON</b>!\n\nDigitālie risinājumi uzņēmumiem: Telegram roboti, automatizācija, mājaslapas un izstrāde.",
+'welcome_en':"👋 Welcome to <b>ZYVERON</b>!\n\nDigital solutions for businesses: Telegram bots, automation, websites and development.",
+'ack_ru':"✅ <b>Спасибо! Ваша заявка принята.</b>\nМы получили ваше сообщение и ответим на него как можно скорее.",
+'ack_lv':"✅ <b>Paldies! Jūsu pieteikums ir saņemts.</b>\nMēs to izskatīsim un atbildēsim pēc iespējas ātrāk.",
+'ack_en':"✅ <b>Thank you! Your request has been received.</b>\nWe will review it and get back to you as soon as possible.",
+'contact_ru':"💬 <b>Связаться с ZYVERON</b>\n\nНапишите ваше сообщение одним сообщением.",
+'contact_lv':"💬 <b>Sazināties ar ZYVERON</b>\n\nNosūtiet savu ziņu vienā ziņā.",
+'contact_en':"💬 <b>Contact ZYVERON</b>\n\nSend your message in one message."
+}
+for k,v in defaults.items(): cur.execute("INSERT OR IGNORE INTO settings VALUES(?,?)",(k,v))
+menu_defaults=[
+('services','🛠 Услуги','🛠 Pakalpojumi','🛠 Services','services',1,1),
+('prices','💰 Цены','💰 Cenas','💰 Prices','prices',1,2),
+('portfolio','🖼 Портфолио','🖼 Portfolio','🖼 Portfolio','portfolio',1,3),
+('order','📝 Заказать','📝 Pasūtīt','📝 Order','order',1,4),
+('contact','📞 Связаться','📞 Sazināties','📞 Contact','contact',1,5),
+('language','🌐 Язык','🌐 Valoda','🌐 Language','language',1,6)]
+for x in menu_defaults: cur.execute("INSERT OR IGNORE INTO menu(key,label_ru,label_lv,label_en,action,active,sort) VALUES(?,?,?,?,?,?,?)",x)
+conn.commit()
+
+def setting(k): return cur.execute("SELECT v FROM settings WHERE k=?",(k,)).fetchone()["v"]
 def lang(uid):
- r=conn.execute('SELECT lang FROM users WHERE id=?',(uid,)).fetchone(); return r['lang'] if r else 'ru'
-def ensure_user(uid): conn.execute('INSERT OR IGNORE INTO users(id) VALUES(?)',(uid,)); conn.commit()
-def kb(uid):
- l=lang(uid); x=T[l]; return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=x['services'],callback_data='services'),InlineKeyboardButton(text=x['prices'],callback_data='prices')],[InlineKeyboardButton(text=x['portfolio'],callback_data='portfolio')],[InlineKeyboardButton(text=x['order'],callback_data='order'),InlineKeyboardButton(text=x['contact'],callback_data='contact')],[InlineKeyboardButton(text=x['language'],callback_data='language')]])
-def back(uid): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=T[lang(uid)]['back'],callback_data='home')]])
-def admin_kb(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='💰 Цены',callback_data='a_prices')],[InlineKeyboardButton(text='🛠 Услуги',callback_data='a_services')],[InlineKeyboardButton(text='📝 Заявки',callback_data='a_requests')],[InlineKeyboardButton(text='🖼 Портфолио',callback_data='a_portfolio')],[InlineKeyboardButton(text='✏️ Тексты/контакты',callback_data='a_texts')]])
-state={}
-def is_admin(m): return m.from_user.id==ADMIN_ID
+    r=cur.execute("SELECT lang FROM users WHERE id=?",(uid,)).fetchone()
+    return r["lang"] if r and r["lang"] else None
+def text(row,l,field):
+    return row[f"{field}_{l}"]
+def label(row,l): return row[f"label_{l}"]
+def main_kb(l):
+    rows=cur.execute("SELECT * FROM menu WHERE active=1 ORDER BY sort").fetchall()
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label(r,l),callback_data="m:"+r["action"])] for r in rows
+    ])
+def languages():
+    return InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text="🇷🇺 Русский",callback_data="lang:ru")],
+      [InlineKeyboardButton(text="🇱🇻 Latviešu",callback_data="lang:lv")],
+      [InlineKeyboardButton(text="🇬🇧 English",callback_data="lang:en")]])
+def back(l): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text={"ru":"⬅️ Назад","lv":"⬅️ Atpakaļ","en":"⬅️ Back"}[l],callback_data="home")]])
+
+class Contact(StatesGroup): message=State()
+class Order(StatesGroup): service=State(); text=State(); budget=State(); contact=State()
+class AdminEdit(StatesGroup): value=State()
+class ServiceAdd(StatesGroup): name=State(); desc=State(); price=State()
+
+async def show_home(message_or_call,l):
+    uid=message_or_call.from_user.id
+    if isinstance(message_or_call,Message):
+        if Path(LOGO_PATH).exists():
+            await message_or_call.answer_photo(__import__('aiogram').types.FSInputFile(LOGO_PATH),caption=setting("welcome_"+l),reply_markup=main_kb(l),parse_mode="HTML")
+        else: await message_or_call.answer(setting("welcome_"+l),reply_markup=main_kb(l),parse_mode="HTML")
+    else:
+        await message_or_call.message.edit_text(setting("welcome_"+l),reply_markup=main_kb(l),parse_mode="HTML")
+        await message_or_call.answer()
+
 @dp.message(CommandStart())
-async def start(m):
- ensure_user(m.from_user.id); r=conn.execute('SELECT lang FROM users WHERE id=?',(m.from_user.id,)).fetchone()
- if r and r['lang']!='ru' and setting('lang_set_'+str(m.from_user.id),'')=='1': await m.answer(T[r['lang']]['welcome'],reply_markup=kb(m.from_user.id),parse_mode='HTML'); return
- await m.answer('🌐 <b>'+T['ru']['choose']+'</b>',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🇷🇺 Русский',callback_data='set_ru'),InlineKeyboardButton(text='🇱🇻 Latviešu',callback_data='set_lv')],[InlineKeyboardButton(text='🇬🇧 English',callback_data='set_en')]]),parse_mode='HTML')
-@dp.callback_query(F.data.startswith('set_'))
-async def setlang(c):
- l=c.data[-2:]; ensure_user(c.from_user.id); conn.execute('UPDATE users SET lang=? WHERE id=?',(l,c.from_user.id)); conn.commit(); set_setting('lang_set_'+str(c.from_user.id),'1'); await c.message.edit_text(T[l]['welcome'],reply_markup=kb(c.from_user.id),parse_mode='HTML'); await c.answer()
-@dp.callback_query(F.data=='home')
-async def home(c): await c.message.edit_text(T[lang(c.from_user.id)]['welcome'],reply_markup=kb(c.from_user.id),parse_mode='HTML'); await c.answer()
-@dp.callback_query(F.data=='language')
-async def language(c): await c.message.edit_text(T[lang(c.from_user.id)]['choose'],reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🇷🇺 Русский',callback_data='set_ru'),InlineKeyboardButton(text='🇱🇻 Latviešu',callback_data='set_lv')],[InlineKeyboardButton(text='🇬🇧 English',callback_data='set_en')]])); await c.answer()
-@dp.callback_query(F.data=='services')
-async def services(c):
- rows=conn.execute('SELECT * FROM services WHERE active=1').fetchall(); text=T[lang(c.from_user.id)]['services']+'\n\n'+'\n\n'.join(f"<b>{r['name']}</b>\n{r['description']}" for r in rows) or 'Пока нет услуг.'; await c.message.edit_text(text,reply_markup=back(c.from_user.id),parse_mode='HTML'); await c.answer()
-@dp.callback_query(F.data=='prices')
-async def prices(c):
- rows=conn.execute('SELECT * FROM services WHERE active=1').fetchall(); text='💰 <b>'+T[lang(c.from_user.id)]['prices']+'</b>\n\n'+'\n'.join(f"• {r['name']} — <b>{r['price']}</b>" for r in rows); await c.message.edit_text(text,reply_markup=back(c.from_user.id),parse_mode='HTML'); await c.answer()
-@dp.callback_query(F.data=='portfolio')
-async def portfolio(c):
- rows=conn.execute('SELECT * FROM portfolio ORDER BY id DESC LIMIT 10').fetchall()
- if not rows: await c.message.edit_text('🖼 <b>Портфолио</b>\n\nПока нет работ.',reply_markup=back(c.from_user.id),parse_mode='HTML')
- else:
-  for r in rows: await bot.send_photo(c.from_user.id,r['file_id'],caption=r['caption'] or '')
-  await c.message.edit_text('🖼 <b>Портфолио</b>',reply_markup=back(c.from_user.id),parse_mode='HTML')
- await c.answer()
-@dp.callback_query(F.data.in_({'contact','order'}))
-async def form_start(c):
- state[c.from_user.id]={'kind':c.data,'step':'text'}; await c.message.edit_text('📝 '+T[lang(c.from_user.id)]['ask'],reply_markup=back(c.from_user.id)); await c.answer()
-@dp.message()
-async def text_message(m:Message):
- uid=m.from_user.id
- if uid==ADMIN_ID and uid in state:
-  s=state[uid]; act=s.get('admin_action')
-  if act:
-   if act.startswith('price:'): conn.execute('UPDATE services SET price=? WHERE id=?',(m.text, int(act.split(':')[1]))); conn.commit(); state.pop(uid); await m.answer('✅ Цена обновлена.',reply_markup=admin_kb()); return
-   if act.startswith('name:'): conn.execute('UPDATE services SET name=? WHERE id=?',(m.text,int(act.split(':')[1]))); conn.commit(); state.pop(uid); await m.answer('✅ Название обновлено.',reply_markup=admin_kb()); return
-   if act.startswith('desc:'): conn.execute('UPDATE services SET description=? WHERE id=?',(m.text,int(act.split(':')[1]))); conn.commit(); state.pop(uid); await m.answer('✅ Описание обновлено.',reply_markup=admin_kb()); return
-   if act=='contact': set_setting('contact',m.text); state.pop(uid); await m.answer('✅ Контакт сохранён.',reply_markup=admin_kb()); return
-  if s.get('admin_new_service'):
-   parts=m.text.split('|',2)
-   if len(parts)==3: conn.execute('INSERT INTO services(name,description,price) VALUES(?,?,?)',tuple(x.strip() for x in parts)); conn.commit(); state.pop(uid); await m.answer('✅ Услуга добавлена. Формат: название | описание | цена',reply_markup=admin_kb()); return
- if uid in state and state[uid].get('kind') in ('contact','order'):
-  s=state.pop(uid); contact=m.from_user.username or str(uid); rid=conn.execute('INSERT INTO requests(kind,user_id,name,username,lang,text,contact) VALUES(?,?,?,?,?,?,?)',(s['kind'],uid,m.from_user.full_name,m.from_user.username,lang(uid),m.text,contact)).lastrowid; conn.commit()
-  if ADMIN_ID: await bot.send_message(ADMIN_ID,f"🆕 <b>Новая {'заявка' if s['kind']=='order' else 'связь'} #{rid}</b>\n👤 {m.from_user.full_name}\n🆔 <code>{uid}</code>\n💬 @{m.from_user.username or 'нет'}\n🌐 {lang(uid)}\n\n{m.text}",parse_mode='HTML')
-  await m.answer(T[lang(uid)]['sent']); await m.answer(T[lang(uid)]['welcome'],reply_markup=kb(uid),parse_mode='HTML'); return
- if uid==ADMIN_ID: await m.answer('Используйте /admin')
+async def start(m:Message):
+    cur.execute("INSERT OR IGNORE INTO users(id,name,username) VALUES(?,?,?)",(m.from_user.id,m.from_user.full_name,m.from_user.username)); conn.commit()
+    l=lang(m.from_user.id)
+    if not l:
+        if Path(LOGO_PATH).exists(): await m.answer_photo(__import__('aiogram').types.FSInputFile(LOGO_PATH),caption="🌐 <b>Choose language / Выберите язык / Izvēlieties valodu</b>",reply_markup=languages(),parse_mode="HTML")
+        else: await m.answer("🌐 Choose language / Выберите язык / Izvēlieties valodu",reply_markup=languages())
+    else: await show_home(m,l)
+
+@dp.callback_query(F.data.startswith("lang:"))
+async def choose_lang(c:CallbackQuery):
+    l=c.data.split(":")[1]
+    cur.execute("UPDATE users SET lang=?,name=?,username=? WHERE id=?",(l,c.from_user.full_name,c.from_user.username,c.from_user.id)); conn.commit()
+    await show_home(c,l)
+
+@dp.callback_query(F.data=="home")
+async def home(c:CallbackQuery): await show_home(c,lang(c.from_user.id) or "ru")
+
+@dp.callback_query(F.data=="m:language")
+async def change_lang(c:CallbackQuery):
+    await c.message.edit_text("🌐 Выберите язык / Izvēlieties valodu / Choose language",reply_markup=languages()); await c.answer()
+
+@dp.callback_query(F.data=="m:services")
+async def services(c:CallbackQuery):
+    l=lang(c.from_user.id) or "ru"; rows=cur.execute("SELECT * FROM services WHERE active=1 ORDER BY sort").fetchall()
+    if not rows: await c.message.edit_text({"ru":"🛠 Услуги пока не добавлены.","lv":"🛠 Pakalpojumi vēl nav pievienoti.","en":"🛠 No services yet."}[l],reply_markup=back(l))
+    else:
+        buttons=[[InlineKeyboardButton(text=f"{r['name_'+l]} — {r['price_'+l]}",callback_data=f"svc:{r['id']}")] for r in rows]
+        buttons.append([InlineKeyboardButton(text={"ru":"⬅️ Назад","lv":"⬅️ Atpakaļ","en":"⬅️ Back"}[l],callback_data="home")])
+        await c.message.edit_text({"ru":"🛠 <b>Услуги</b>\n\nВыберите услугу:","lv":"🛠 <b>Pakalpojumi</b>\n\nIzvēlieties pakalpojumu:","en":"🛠 <b>Services</b>\n\nChoose a service:"}[l],reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML")
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("svc:"))
+async def service_detail(c:CallbackQuery):
+    l=lang(c.from_user.id) or "ru"; r=cur.execute("SELECT * FROM services WHERE id=?",(int(c.data.split(":")[1]),)).fetchone()
+    await c.message.edit_text(f"<b>{r['name_'+l]}</b>\n\n{r['desc_'+l]}\n\n💰 {r['price_'+l]}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text={"ru":"📝 Заказать","lv":"📝 Pasūtīt","en":"📝 Order"}[l],callback_data=f"order:{r['id']}")],[InlineKeyboardButton(text={"ru":"⬅️ Назад","lv":"⬅️ Atpakaļ","en":"⬅️ Back"}[l],callback_data="m:services")]]),parse_mode="HTML"); await c.answer()
+
+@dp.callback_query(F.data=="m:prices")
+async def prices(c:CallbackQuery):
+    l=lang(c.from_user.id) or "ru"; rows=cur.execute("SELECT * FROM services WHERE active=1 ORDER BY sort").fetchall()
+    body={"ru":"💰 <b>Цены</b>\n\n","lv":"💰 <b>Cenas</b>\n\n","en":"💰 <b>Prices</b>\n\n"}[l]+ "\n".join(f"• {r['name_'+l]} — {r['price_'+l]}" for r in rows)
+    await c.message.edit_text(body,reply_markup=back(l),parse_mode="HTML"); await c.answer()
+
+@dp.callback_query(F.data=="m:portfolio")
+async def portfolio(c:CallbackQuery):
+    l=lang(c.from_user.id) or "ru"; rows=cur.execute("SELECT * FROM portfolio WHERE active=1 ORDER BY sort").fetchall()
+    if not rows: await c.message.edit_text({"ru":"🖼 Портфолио пока пусто.","lv":"🖼 Portfolio vēl ir tukšs.","en":"🖼 Portfolio is empty."}[l],reply_markup=back(l))
+    else:
+        for r in rows:
+            await c.message.answer_photo(r["file_id"],caption=f"<b>{r['title_'+l]}</b>\n{r['desc_'+l]}",parse_mode="HTML")
+        await c.message.answer({"ru":"🖼 Портфолио","lv":"🖼 Portfolio","en":"🖼 Portfolio"}[l],reply_markup=back(l))
+        await c.message.delete()
+    await c.answer()
+
+@dp.callback_query(F.data=="m:contact")
+async def contact(c:CallbackQuery,state:FSMContext):
+    l=lang(c.from_user.id) or "ru"; await state.set_state(Contact.message)
+    await c.message.edit_text(setting("contact_"+l),reply_markup=back(l),parse_mode="HTML"); await c.answer()
+
+@dp.message(Contact.message)
+async def contact_receive(m:Message,state:FSMContext):
+    l=lang(m.from_user.id) or "ru"
+    cur.execute("INSERT INTO requests(user_id,kind,text,contact) VALUES(?,?,?,?)",(m.from_user.id,"contact",m.text or "",f"@{m.from_user.username}" if m.from_user.username else str(m.from_user.id))); conn.commit()
+    if ADMIN_ID: await bot.send_message(ADMIN_ID,f"📩 <b>Новое сообщение</b>\n👤 {m.from_user.full_name}\n🆔 <code>{m.from_user.id}</code>\n💬 @{m.from_user.username or 'нет'}\n\n{m.text or ''}",parse_mode="HTML")
+    await state.clear(); await m.answer(setting("ack_"+l),reply_markup=main_kb(l),parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("order:"))
+async def order_start(c:CallbackQuery,state:FSMContext):
+    l=lang(c.from_user.id) or "ru"; sid=int(c.data.split(":")[1]); r=cur.execute("SELECT * FROM services WHERE id=?",(sid,)).fetchone()
+    await state.update_data(service=r["name_"+l]); await state.set_state(Order.text)
+    await c.message.edit_text({"ru":"📝 Опишите задачу:","lv":"📝 Aprakstiet uzdevumu:","en":"📝 Describe your task:"}[l],reply_markup=back(l)); await c.answer()
+
+@dp.callback_query(F.data=="m:order")
+async def generic_order(c:CallbackQuery,state:FSMContext):
+    l=lang(c.from_user.id) or "ru"; await state.update_data(service="Не указана"); await state.set_state(Order.text)
+    await c.message.edit_text({"ru":"📝 Опишите, что вам нужно:","lv":"📝 Aprakstiet, kas jums nepieciešams:","en":"📝 Describe what you need:"}[l],reply_markup=back(l)); await c.answer()
+
+@dp.message(Order.text)
+async def order_text(m:Message,state:FSMContext):
+    l=lang(m.from_user.id) or "ru"; await state.update_data(text=m.text or ""); await state.set_state(Order.budget)
+    await m.answer({"ru":"💰 Укажите бюджет или напишите «не знаю»:","lv":"💰 Norādiet budžetu vai rakstiet «nezinu»:","en":"💰 Enter your budget or type “I don't know”:"}[l])
+
+@dp.message(Order.budget)
+async def order_budget(m:Message,state:FSMContext):
+    await state.update_data(budget=m.text or ""); await state.set_state(Order.contact)
+    l=lang(m.from_user.id) or "ru"; await m.answer({"ru":"📞 Оставьте контакт для связи:","lv":"📞 Norādiet kontaktinformāciju:","en":"📞 Leave a contact:"}[l])
+
+@dp.message(Order.contact)
+async def order_contact(m:Message,state:FSMContext):
+    l=lang(m.from_user.id) or "ru"; d=await state.get_data()
+    cur.execute("INSERT INTO requests(user_id,kind,service,budget,contact,text) VALUES(?,?,?,?,?,?)",(m.from_user.id,"order",d.get("service",""),d.get("budget",""),m.text or "",d.get("text",""))); conn.commit()
+    if ADMIN_ID: await bot.send_message(ADMIN_ID,f"🆕 <b>Новая заявка</b>\n👤 {m.from_user.full_name}\n🆔 <code>{m.from_user.id}</code>\n🛠 {d.get('service','')}\n💰 {d.get('budget','')}\n📞 {m.text or ''}\n📝 {d.get('text','')}",parse_mode="HTML")
+    await state.clear(); await m.answer(setting("ack_"+l),reply_markup=main_kb(l),parse_mode="HTML")
+
+# ADMIN
+def is_admin(uid): return ADMIN_ID and uid==ADMIN_ID
+def admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text="🛠 Услуги",callback_data="a:services"),InlineKeyboardButton(text="💰 Цены",callback_data="a:prices")],
+      [InlineKeyboardButton(text="✏️ Тексты",callback_data="a:texts"),InlineKeyboardButton(text="🔘 Меню",callback_data="a:menu")],
+      [InlineKeyboardButton(text="🖼 Портфолио",callback_data="a:portfolio"),InlineKeyboardButton(text="📥 Заявки",callback_data="a:requests")],
+    ])
+@dp.message(Command("admin"))
+async def admin(m:Message):
+    if not is_admin(m.from_user.id): return
+    await m.answer("🔐 <b>ZYVERON Admin</b>\n\nВыберите раздел:",reply_markup=admin_kb(),parse_mode="HTML")
+
+@dp.callback_query(F.data=="a:prices")
+async def a_prices(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    rows=cur.execute("SELECT * FROM services ORDER BY sort").fetchall()
+    kb=[[InlineKeyboardButton(text=f"💰 {r['name_ru']}",callback_data=f"a:price:{r['id']}")] for r in rows]
+    kb.append([InlineKeyboardButton(text="⬅️ Админ-панель",callback_data="a:home")])
+    await c.message.edit_text("💰 <b>Изменение цен</b>\n\nВыберите услугу:",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),parse_mode="HTML"); await c.answer()
+@dp.callback_query(F.data.startswith("a:price:"))
+async def a_price(c:CallbackQuery,state:FSMContext):
+    if not is_admin(c.from_user.id): return
+    sid=int(c.data.split(":")[2]); await state.update_data(mode="price",sid=sid); await state.set_state(AdminEdit.value)
+    await c.message.edit_text("Введите новое значение цены. Можно написать число или любой текст:\n\nПримеры: <code>50 €</code>, <code>от €50</code>, <code>по запросу</code>, <code>недоступно</code>",parse_mode="HTML"); await c.answer()
+
+@dp.callback_query(F.data=="a:texts")
+async def a_texts(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    kb=[]
+    for k in ["welcome","ack","contact"]:
+        for l,n in [("ru","🇷🇺"),("lv","🇱🇻"),("en","🇬🇧")]:
+            kb.append([InlineKeyboardButton(text=f"{n} {k}",callback_data=f"a:text:{k}:{l}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Админ-панель",callback_data="a:home")])
+    await c.message.edit_text("✏️ Выберите текст:",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await c.answer()
+@dp.callback_query(F.data.startswith("a:text:"))
+async def a_text(c:CallbackQuery,state:FSMContext):
+    if not is_admin(c.from_user.id): return
+    _,_,k,l=c.data.split(":"); await state.update_data(mode="text",key=f"{k}_{l}"); await state.set_state(AdminEdit.value)
+    await c.message.edit_text(f"Отправьте новый текст для <b>{k} / {l}</b>.",parse_mode="HTML"); await c.answer()
+
+@dp.message(AdminEdit.value)
+async def admin_value(m:Message,state:FSMContext):
+    if not is_admin(m.from_user.id): return
+    d=await state.get_data()
+    if d.get("mode")=="price":
+        cur.execute(f"UPDATE services SET price_ru=price_ru, price_lv=price_lv, price_en=price_en WHERE id=?",(d["sid"],))
+        # Set all language prices to supplied value; admin can use text in all languages.
+        cur.execute("UPDATE services SET price_ru=?,price_lv=?,price_en=? WHERE id=?",(m.text,m.text,m.text,d["sid"]))
+    elif d.get("mode")=="text":
+        cur.execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",(d["key"],m.text))
+    conn.commit(); await state.clear(); await m.answer("✅ Сохранено.\n\nОткройте /admin для продолжения.",reply_markup=admin_kb())
+
+@dp.callback_query(F.data=="a:home")
+async def a_home(c:CallbackQuery):
+    if is_admin(c.from_user.id): await c.message.edit_text("🔐 <b>ZYVERON Admin</b>",reply_markup=admin_kb(),parse_mode="HTML")
+    await c.answer()
+
+@dp.callback_query(F.data=="a:services")
+async def a_services(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    rows=cur.execute("SELECT * FROM services ORDER BY sort").fetchall()
+    kb=[[InlineKeyboardButton(text=("🟢 " if r["active"] else "🔴 ")+r["name_ru"],callback_data=f"a:svc:{r['id']}")] for r in rows]
+    kb.append([InlineKeyboardButton(text="➕ Добавить услугу",callback_data="a:addsvc")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="a:home")])
+    await c.message.edit_text("🛠 Управление услугами:",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await c.answer()
+@dp.callback_query(F.data.startswith("a:svc:"))
+async def a_svc(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    sid=int(c.data.split(":")[2]); r=cur.execute("SELECT * FROM services WHERE id=?",(sid,)).fetchone()
+    kb=[[InlineKeyboardButton(text="💰 Цена",callback_data=f"a:price:{sid}")],
+        [InlineKeyboardButton(text="🗑 Удалить",callback_data=f"a:del:{sid}"),
+         InlineKeyboardButton(text="🔄 Вкл/выкл",callback_data=f"a:toggle:{sid}")],
+        [InlineKeyboardButton(text="⬅️ Назад",callback_data="a:services")]]
+    await c.message.edit_text(f"<b>{r['name_ru']}</b>\n\n{r['desc_ru']}\n\n💰 {r['price_ru']}",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),parse_mode="HTML"); await c.answer()
+
+@dp.callback_query(F.data.startswith("a:del:"))
+async def a_del(c:CallbackQuery):
+    if is_admin(c.from_user.id): cur.execute("DELETE FROM services WHERE id=?",(int(c.data.split(":")[2]),)); conn.commit(); await a_services(c)
+@dp.callback_query(F.data.startswith("a:toggle:"))
+async def a_toggle(c:CallbackQuery):
+    if is_admin(c.from_user.id):
+        sid=int(c.data.split(":")[2]); cur.execute("UPDATE services SET active=1-active WHERE id=?",(sid,)); conn.commit(); await a_services(c)
+
+@dp.callback_query(F.data=="a:requests")
+async def a_requests(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    rows=cur.execute("SELECT * FROM requests ORDER BY id DESC LIMIT 20").fetchall()
+    if not rows: body="📥 Заявок пока нет."
+    else: body="\n\n".join(f"#{r['id']} • {r['kind']} • {r['status']}\n👤 <code>{r['user_id']}</code>\n🛠 {r['service'] or '-'}\n💰 {r['budget'] or '-'}\n📝 {r['text'] or '-'}\n📞 {r['contact'] or '-'}" for r in rows)
+    await c.message.edit_text("📥 <b>Последние заявки</b>\n\n"+body,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад",callback_data="a:home")]]),parse_mode="HTML"); await c.answer()
+
+@dp.callback_query(F.data=="a:portfolio")
+async def a_portfolio(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    rows=cur.execute("SELECT * FROM portfolio ORDER BY sort").fetchall()
+    kb=[[InlineKeyboardButton(text=f"🗑 {r['title_ru']}",callback_data=f"a:pdel:{r['id']}")] for r in rows]
+    kb.append([InlineKeyboardButton(text="📸 Чтобы добавить работу: отправьте фото боту",callback_data="a:home")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="a:home")])
+    await c.message.edit_text("🖼 <b>Портфолио</b>\n\n"+("\n".join(f"• {r['title_ru']}" for r in rows) if rows else "Пока пусто."),reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),parse_mode="HTML"); await c.answer()
 
 @dp.message(F.photo)
-async def photo_admin(m):
- if m.from_user.id==ADMIN_ID and state.get(m.from_user.id,{}).get('admin_new_photo'):
-  cap=m.caption or ''; conn.execute('INSERT INTO portfolio(file_id,caption) VALUES(?,?)',(m.photo[-1].file_id,cap)); conn.commit(); state.pop(m.from_user.id); await m.answer('✅ Работа добавлена в портфолио.',reply_markup=admin_kb())
-@dp.message(commands=['admin'])
-async def admin_cmd(m):
- if not is_admin(m): return
- await m.answer('🔐 <b>ZYVERON Admin</b>\n\nВыберите раздел:',reply_markup=admin_kb(),parse_mode='HTML')
-@dp.callback_query(F.data.startswith('a_'))
-async def admin_menu(c):
- if c.from_user.id!=ADMIN_ID: return await c.answer('Нет доступа',show_alert=True)
- a=c.data
- if a=='a_prices' or a=='a_services':
-  rows=conn.execute('SELECT * FROM services ORDER BY id').fetchall(); buttons=[[InlineKeyboardButton(text=f"{r['name']} | {r['price']}",callback_data=f"edit:{r['id']}")] for r in rows]
-  buttons.append([InlineKeyboardButton(text='➕ Добавить услугу',callback_data='new_service')]); buttons.append([InlineKeyboardButton(text='⬅️ Админ-меню',callback_data='admin')]); await c.message.edit_text('🛠 <b>Услуги и цены</b>\n\nНажмите на услугу для редактирования.',reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode='HTML')
- elif a=='a_requests':
-  rows=conn.execute("SELECT * FROM requests WHERE status='new' ORDER BY id DESC LIMIT 20").fetchall(); text='📝 <b>Новые заявки</b>\n\n'+('\n'.join(f"#{r['id']} • {r['name']} • {r['kind']}\n{r['text'][:100]}" for r in rows) if rows else 'Нет новых заявок.'); await c.message.edit_text(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⬅️ Админ-меню',callback_data='admin')]]),parse_mode='HTML')
- elif a=='a_portfolio': await c.message.edit_text('🖼 <b>Портфолио</b>\n\nНажмите «Добавить» и отправьте фотографию с подписью.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='➕ Добавить фото',callback_data='new_photo')],[InlineKeyboardButton(text='⬅️ Админ-меню',callback_data='admin')]]),parse_mode='HTML')
- elif a=='a_texts': await c.message.edit_text(f"✏️ <b>Тексты и контакты</b>\n\nТекущий контакт: {setting('contact','не задан')}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📞 Изменить контакт',callback_data='edit_contact')],[InlineKeyboardButton(text='⬅️ Админ-меню',callback_data='admin')]]),parse_mode='HTML')
- await c.answer()
-@dp.callback_query(F.data=='admin')
-async def admin_back(c):
- if c.from_user.id==ADMIN_ID: await c.message.edit_text('🔐 <b>ZYVERON Admin</b>',reply_markup=admin_kb(),parse_mode='HTML')
- await c.answer()
-@dp.callback_query(F.data.startswith('edit:'))
-async def edit_service(c):
- if c.from_user.id!=ADMIN_ID:return
- sid=int(c.data.split(':')[1]); r=conn.execute('SELECT * FROM services WHERE id=?',(sid,)).fetchone();
- kb2=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='💰 Изменить цену',callback_data=f'price:{sid}')],[InlineKeyboardButton(text='✏️ Изменить название',callback_data=f'name:{sid}')],[InlineKeyboardButton(text='📝 Изменить описание',callback_data=f'desc:{sid}')],[InlineKeyboardButton(text='⬅️ Назад',callback_data='a_services')]])
- await c.message.edit_text(f"<b>{r['name']}</b>\nЦена: {r['price']}\nОписание: {r['description']}",reply_markup=kb2,parse_mode='HTML'); await c.answer()
-@dp.callback_query(F.data.startswith(('price:','name:','desc:')))
-async def edit_field(c):
- if c.from_user.id!=ADMIN_ID:return
- act,sid=c.data.split(':'); state[c.from_user.id]={'admin_action':f'{act}:{sid}'}; labels={'price':'цену','name':'название','desc':'описание'}; await c.message.answer(f'Введите новое значение для {labels[act]}.'); await c.answer()
-@dp.callback_query(F.data=='new_service')
-async def new_service(c): state[c.from_user.id]={'admin_new_service':True}; await c.message.answer('Отправьте: название | описание | цена\nНапример: Бот для магазина | Заказы и уведомления | от €100'); await c.answer()
-@dp.callback_query(F.data=='new_photo')
-async def new_photo(c): state[c.from_user.id]={'admin_new_photo':True}; await c.message.answer('Отправьте фотографию. В подписи можно написать описание работы.'); await c.answer()
-@dp.callback_query(F.data=='edit_contact')
-async def edit_contact(c): state[c.from_user.id]={'admin_action':'contact'}; await c.message.answer('Введите новый контакт, например @zyveron или ссылку.'); await c.answer()
+async def photo_admin(m:Message):
+    if not is_admin(m.from_user.id): return
+    fid=m.photo[-1].file_id
+    cur.execute("INSERT INTO portfolio(file_id,title_ru,title_lv,title_en,desc_ru,desc_lv,desc_en) VALUES(?,?,?,?,?,?,?)",(fid,"Новая работа","Jauns darbs","New work","","","")); conn.commit()
+    await m.answer("📸 Фото добавлено в портфолио. Название/описание можно доработать в админ-панели.")
+
+@dp.callback_query(F.data.startswith("a:pdel:"))
+async def pdel(c:CallbackQuery):
+    if is_admin(c.from_user.id): cur.execute("DELETE FROM portfolio WHERE id=?",(int(c.data.split(":")[2]),)); conn.commit(); await a_portfolio(c)
+
+@dp.callback_query(F.data=="a:menu")
+async def a_menu(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    rows=cur.execute("SELECT * FROM menu ORDER BY sort").fetchall()
+    kb=[[InlineKeyboardButton(text=("🟢 " if r["active"] else "🔴 ")+r["label_ru"],callback_data=f"a:m:{r['id']}")] for r in rows]
+    kb.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="a:home")])
+    await c.message.edit_text("🔘 <b>Структура главного меню</b>\n\nВыберите кнопку для включения/выключения.",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),parse_mode="HTML"); await c.answer()
+@dp.callback_query(F.data.startswith("a:m:"))
+async def a_menu_toggle(c:CallbackQuery):
+    if is_admin(c.from_user.id):
+        mid=int(c.data.split(":")[2]); cur.execute("UPDATE menu SET active=1-active WHERE id=?",(mid,)); conn.commit(); await a_menu(c)
 
 async def main(): await dp.start_polling(bot)
-if __name__=='__main__': asyncio.run(main())
+if __name__=="__main__": asyncio.run(main())

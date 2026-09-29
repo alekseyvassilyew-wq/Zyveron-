@@ -9,6 +9,8 @@ services:
         sync: false
       - key: ADMIN_ID
         sync: false
+      - key: DB_PATH
+        value: /opt/render/project/src/data/zyveron.db
     disk:
       name: zyveron-data
       mountPath: /opt/render/project/src/data
