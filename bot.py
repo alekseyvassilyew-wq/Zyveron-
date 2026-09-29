@@ -11,7 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 logging.basicConfig(level=logging.INFO)
 TOKEN=os.getenv("BOT_TOKEN")
 ADMIN_ID=int(os.getenv("ADMIN_ID","0"))
-DB_PATH=os.getenv("DB_PATH","/opt/render/project/src/data/zyveron.db")
+DB_PATH=os.getenv("DB_PATH","/data/zyveron.db")
 LOGO_PATH=os.getenv("LOGO_PATH","media/logo.jpg")
 if not TOKEN: raise RuntimeError("BOT_TOKEN is not set")
 Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
