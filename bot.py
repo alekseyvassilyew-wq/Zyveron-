@@ -76,12 +76,35 @@ class ServiceAdd(StatesGroup): name=State(); desc=State(); price=State()
 
 async def show_home(message_or_call,l):
     uid=message_or_call.from_user.id
+
     if isinstance(message_or_call,Message):
         if Path(LOGO_PATH).exists():
-            await message_or_call.answer_photo(__import__('aiogram').types.FSInputFile(LOGO_PATH),caption=setting("welcome_"+l),reply_markup=main_kb(l),parse_mode="HTML")
-        else: await message_or_call.answer(setting("welcome_"+l),reply_markup=main_kb(l),parse_mode="HTML")
+            await message_or_call.answer_photo(
+                __import__('aiogram').types.FSInputFile(LOGO_PATH),
+                caption=setting("welcome_"+l),
+                reply_markup=main_kb(l),
+                parse_mode="HTML"
+            )
+        else:
+            await message_or_call.answer(
+                setting("welcome_"+l),
+                reply_markup=main_kb(l),
+                parse_mode="HTML"
+            )
     else:
-        await message_or_call.message.edit_text(setting("welcome_"+l),reply_markup=main_kb(l),parse_mode="HTML")
+        if message_or_call.message.photo:
+            await message_or_call.message.edit_caption(
+                caption=setting("welcome_"+l),
+                reply_markup=main_kb(l),
+                parse_mode="HTML"
+            )
+        else:
+            await message_or_call.message.edit_text(
+                setting("welcome_"+l),
+                reply_markup=main_kb(l),
+                parse_mode="HTML"
+            )
+
         await message_or_call.answer()
 
 @dp.message(CommandStart())
