@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: zyveron-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+    disk:
+      name: zyveron-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
